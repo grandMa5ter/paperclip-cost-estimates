@@ -1,19 +1,8 @@
 import { definePlugin, runWorker, type PluginContext } from '@paperclipai/plugin-sdk';
-import { PRICE_URL, PRICE_TTL_MS, parsePrices, summarise, validateRange } from './pricing.mjs';
+import { PRICE_URL, PRICE_TTL_MS, parsePrices, validateRange } from './pricing.mjs';
+import { createConnector } from './connector.ts';
 const latestKey = { scopeKind: 'instance' as const, stateKey: 'prices-latest' };
 type Snapshot = ReturnType<typeof parsePrices>;
-
-export const REPORT_SQL = `SELECT c.provider, c.model, c.project_id, p.name AS project_name,
- c.issue_id, concat(i.identifier, ' ', i.title) AS issue_name, c.agent_id, a.name AS agent_name,
- sum(c.input_tokens)::text AS input_tokens, sum(c.cached_input_tokens)::text AS cached_input_tokens,
- sum(c.output_tokens)::text AS output_tokens, count(*)::text AS events
- FROM public.cost_events c
- LEFT JOIN public.projects p ON p.id = c.project_id AND p.company_id = c.company_id
- LEFT JOIN public.issues i ON i.id = c.issue_id AND i.company_id = c.company_id
- LEFT JOIN public.agents a ON a.id = c.agent_id AND a.company_id = c.company_id
- WHERE c.company_id = $1 AND c.occurred_at >= $2 AND c.occurred_at <= $3
- AND c.provider IN ('openai', 'anthropic')
- GROUP BY c.provider, c.model, c.project_id, p.name, c.issue_id, i.identifier, i.title, c.agent_id, a.name`;
 
 export function createPriceStore(ctx: PluginContext) {
   let pending: Promise<Snapshot> | null = null;
@@ -53,15 +42,28 @@ export function createPriceStore(ctx: PluginContext) {
 const plugin = definePlugin({
   async setup(ctx) {
     const prices = createPriceStore(ctx);
+    const connector = createConnector(ctx, prices);
     ctx.jobs.register('refresh-prices', async () => { await prices.refresh(); });
-    ctx.data.register('report', async params => {
+    ctx.jobs.register('sync-native-costs', async () => {
+      for (const company of await ctx.companies.list()) await connector.sync(company.id);
+    });
+    ctx.events.on('cost_event.created', async event => {
+      if (!event.entityId) return;
+      const original = await ctx.db.query(`SELECT id FROM public.cost_events WHERE company_id = $1 AND id = $2 AND billing_type = 'subscription_included' AND cost_cents = 0`, [event.companyId, event.entityId]);
+      if (original.length) await connector.sync(event.companyId);
+    });
+    ctx.data.register('status', async params => {
       const range = validateRange(params);
       if (!await ctx.companies.get(range.companyId)) throw new Error('Company unavailable');
-      const { snapshot, warning } = await prices.get();
-      const rows = await ctx.db.query(REPORT_SQL, [range.companyId, range.from, range.to]);
-      const report = summarise(rows, snapshot);
-      return { ...report, range, pricing: { source: snapshot.source, fetchedAt: snapshot.fetchedAt,
-        sha256: snapshot.sha256, warning }, basis: 'Current standard API prices; ordinary input, cached input and output only.' };
+      return connector.status(range.companyId);
+    });
+    ctx.actions.register('sync', async (params, context) => {
+      if (context.actor.type !== 'user') throw new Error('Only a board user can run a native cost sync');
+      const { companyId } = validateRange(params);
+      if (context.companyId !== companyId) throw new Error('Company does not match the authenticated scope');
+      const limit = params.limit ?? 50;
+      if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > 50) throw new Error('Batch limit must be between 1 and 50');
+      return connector.sync(companyId, Number(limit));
     });
     ctx.actions.register('refresh-prices', async (_params, context) => {
       if (context.actor.type !== 'user') throw new Error('Only a board user can refresh prices');
@@ -69,7 +71,7 @@ const plugin = definePlugin({
       return { fetchedAt: snapshot.fetchedAt, sha256: snapshot.sha256 };
     });
   },
-  async onHealth() { return { status: 'ok', message: 'Read-only cost estimates; no budget or billing mutations.' }; },
+  async onHealth() { return { status: 'ok', message: 'Subscription valuations feed native Paperclip cost events.' }; },
 });
 export default plugin;
 runWorker(plugin, import.meta.url);

@@ -1,8 +1,8 @@
 {
   "name": "@grandma5ter/paperclip-cost-estimates",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Read-only Claude and Codex API-equivalent project estimates for Paperclip using LiteLLM prices.",
+  "description": "Feed Claude and Codex subscription valuations into native Paperclip costs and budgets using LiteLLM prices.",
   "license": "MIT",
   "author": "grandMa5ter",
   "repository": { "type": "git", "url": "https://github.com/grandMa5ter/paperclip-cost-estimates.git" },

@@ -1,3 +1,3 @@
-This directory intentionally contains no SQL migrations. The SDK requires a
-migrations directory when declaring read access to native tables. The plugin
-stores only public pricing snapshots in its namespaced state store.
+The connector migration creates only its own durable valuation outbox. The schema
+name is the host-derived namespace for the stable plugin ID paperclip-cost-estimates.
+Native cost tables are read-only through the SDK. Native writes use the public API.

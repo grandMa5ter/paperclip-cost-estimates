@@ -1,19 +1,46 @@
-# Paperclip Cost Estimates
+# Paperclip Subscription Cost Connector
 
-A self-contained Paperclip plugin that values recorded Claude and Codex work
-at current standard API token prices from LiteLLM. It adds a **Cost Estimates**
-company page with project, task, agent and model breakdowns.
+Fetch Claude and Codex prices from LiteLLM and feed subscription usage valuations
+into **Paperclip's native cost events**. Paperclip then owns cost summaries,
+agent/project attribution, monthly spend and budget enforcement.
 
-**No Paperclip core patches, adapter changes or budget changes are required.**
-The plugin queries existing usage records through the official Plugin SDK and
-stores public price snapshots in its own namespaced state. It does not write
-cost events, finance events or budget policies.
+Version **0.2.0** replaces the separate calculator shipped in 0.1.0. The plugin
+page now shows connection/sync status and links to native **Audit → Costs**.
+No Paperclip server or adapter patches are required.
+
+## Native accounting
+
+For an original subscription-included cost event with recorded tokens and zero
+cost, the connector posts a supplementary cost event through:
+
+```text
+POST /api/companies/{companyId}/cost-events
+```
+
+The supplementary event:
+
+- Retains provider, model, agent, task, project, goal, run and occurrence time.
+- Has **zero extra tokens**, retaining the original usage counters once.
+- Uses biller `api-equivalent-estimate` and billing code `api-equivalent:<source-event-id>`.
+- Uses the native `fixed` billing type for this supplied nominal valuation.
+- Rounds the valuation to cents per source event, as required by native accounting.
+
+Native Costs, Providers, Billers, project/task totals and monthly budget counters
+all consume these cost events. **These valuations consume native dollar budgets**
+and can trigger the normal warnings and hard stops. Original records remain
+unchanged. Existing metered/API charges are not repriced or duplicated.
+
+The current host supports cost statuses `reported` and `unpriced`; it has no
+separate estimated-cost status for native budget accounting. The supplied
+valuation therefore uses `reported`, while its dedicated biller and billing code
+identify its estimated basis. It is an API-equivalent planning amount, not a
+provider invoice or an additional subscription charge. Account-level subscription
+fees remain in the native finance ledger.
 
 ## Install
 
-Requires Node.js 24.11 or later and Paperclip with the public Plugin SDK.
-Version 0.1.0 is developed against Paperclip / SDK **2026.1005.0**. Compatibility
-with other releases must be verified before upgrading.
+Requires Node.js 24.11+ and Paperclip's Plugin SDK. Developed and verified with
+Paperclip / SDK **2026.1005.0**. Check compatibility before upgrading your host.
 
 ```sh
 git clone https://github.com/grandMa5ter/paperclip-cost-estimates.git
@@ -23,112 +50,113 @@ npm run typecheck
 npm test
 npm run build
 paperclipai plugin install --local "$PWD"
-paperclipai plugin list
 ```
 
-Open your company's **Cost Estimates** plugin page at
-`/<company-prefix>/cost-estimates` (for example, `/ACME/cost-estimates`). Select this month (UTC), the
-last seven days, or all recorded history. **Refresh usage** reads new usage;
-**Update prices** fetches a new public pricing snapshot. Prices refresh daily at
-02:17 UTC and on report access when the stored snapshot is over 24 hours old.
+Local installs need the checkout to remain at that path. Build and validate a new
+versioned directory before replacing a running installation. `npm pack` produces
+a distributable package; an npm-registry release is not currently promised.
 
-Local-path installs need this checkout to remain at its installed path. Avoid
-editing a running installation: build and validate a versioned release directory,
-then install it using the same command. `npm pack` also produces a distributable
-package. This repository does not currently promise an npm-registry release.
+To replace 0.1.0 with 0.2.0 using the supported local-install workflow, ordinary
+uninstall then reinstall retains the plugin's namespaced state. Do not use
+`--force`, which purges state. The new version requests additional secret-reference,
+event-subscription and plugin-namespace write capabilities for native integration.
+
+## Connect
+
+Create a company-scoped native encrypted secret containing a Paperclip **board
+API token** authorized to report costs for that company. Configure the plugin in
+that company with this JSON, using your server origin and secret UUID:
+
+```json
+{
+  "enabled": true,
+  "apiBase": "http://localhost:3100",
+  "apiToken": {
+    "type": "secret_ref",
+    "secretId": "<native-secret-uuid>",
+    "version": "latest"
+  }
+}
+```
+
+Never put a token itself in plugin configuration or Git. The worker resolves the
+bound secret through the official SDK for each batch. Credentials are sent only
+to the configured Paperclip API origin. Public HTTP origins, URL credentials,
+paths, query strings and redirects are rejected; private/loopback HTTP and HTTPS
+are supported. The LiteLLM fetch never receives this token or your usage data.
+
+Once enabled, historical subscription events are backfilled in batches of 50.
+New usage triggers event-driven sync, and a one-minute job catches missed events.
+The status page at `/<company-prefix>/cost-estimates` shows remaining and completed
+records. **Sync next batch** lets a board user request a batch manually. Use native
+**Costs** and **Budgets** for all financial totals and controls.
+
+## Deduplication and failure recovery
+
+Each source event has one durable row in the plugin's private `valuations` table,
+with the exact payload, pricing snapshot hash, processing state and native receipt
+ID. Concurrent claims are atomic. Repeated delivery, worker restart and backfill
+do not repost completed valuations. Connector-generated events are not input
+usage, so they cannot create a pricing loop.
+
+The host's native cost API has no idempotency key. Before sending, the connector
+checks for its deterministic billing code. If the response is lost after the
+event was accepted, it reconciles the native row and records its receipt.
+**An uncertain write without a native receipt is never resent automatically.**
+It remains visible for operator reconciliation. This also applies to a crash
+after claiming a record but before the network request. Unknown models are left
+unvalued until a usable price becomes available.
+
+Disable stops future valuation without changing original usage or existing native
+cost history. Native historical valuations remain part of native budgets; disable
+and uninstall do not reverse them.
 
 ```sh
 paperclipai plugin disable paperclip-cost-estimates
 paperclipai plugin uninstall paperclip-cost-estimates
 ```
 
-Disable stops the plugin without touching native usage or budgets. The ordinary
-uninstall workflow retains plugin state according to Paperclip's lifecycle rules.
+## Pricing basis
 
-## What the number means
-
-This is **current-price API-equivalent token valuation**, including subscription
-and API usage. It is not an invoice, subscription allocation, or an estimate of
-remaining subscription quota. Past usage is repriced using the displayed current
-snapshot; it is not historical billing.
-
-For each exact provider/model match:
+Prices come from the [LiteLLM public price file](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
+The feed refreshes daily at 02:17 UTC and when an accessed snapshot is over 24 hours
+old. Snapshots retain source URL, fetch time and SHA-256. Failed refresh retains
+the prior snapshot; unavailable initial prices prevent valuation.
 
 ```text
-estimated USD = ordinary input tokens × input USD/token
-              + cached input tokens × cache-read USD/token
-              + output tokens × output USD/token
+USD = ordinary input × input_cost_per_token
+    + cached input × cache_read_input_token_cost
+    + output × output_cost_per_token
 ```
 
-Paperclip's normalized ordinary-input and cached-input counters are separate.
-Cached tokens are charged once at the cached-input rate. The report uses only
-first-party `openai` and `anthropic` entries; it does not guess an unknown model's
-rate from another model or silently price cloud/gateway variants.
+These rates are already USD per token. Paperclip ordinary-input and cached-input
+counters are separate. Only exact first-party OpenAI/Anthropic models are matched.
+Cache writes, paid tools, regional uplifts, service-tier premiums and per-request
+context surcharges are excluded. Token receipts may omit some work. These limits
+can understate a future API invoice. All figures are USD.
 
-Missing model or cache-read rates produce **unpriced** usage and an explicitly
-partial total. Usage without a token receipt is not reconstructed. Project/task
-attribution follows the IDs retained on native cost events; unattributed work
-appears in a separate row.
+Each valuation keeps the rate snapshot used when first processed. Price refresh
+does not rewrite historical native valuations. Per-event cent rounding means a
+native total can differ slightly from rounding an aggregate calculator total.
 
-### Estimation limits
-
-The native cost ledger does not expose all billable categories or per-request
-boundaries. This version therefore excludes cache writes, paid tools, fast or
-other service-tier premiums, regional uplifts and per-request context surcharges.
-Those exclusions can understate API-equivalent cost. Request thresholds cannot
-be applied correctly to token totals aggregated across multiple requests.
-
-All figures are USD. Totals retain fractional cents until display. They never
-consume native dollar budgets or pause agents.
-
-## Pricing source and resilience
-
-- [LiteLLM public pricing file](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
-- Direct feed: `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`
-- Input: `input_cost_per_token`; output: `output_cost_per_token`;
-  cache read: `cache_read_input_token_cost`.
-- Feed prices are already USD per token. Do not divide them by one million again.
-
-Downloads have a 15-second timeout and an 8 MiB size limit. A snapshot is accepted
-only when it has usable prices for both providers. Each snapshot carries its
-source URL, retrieval time and SHA-256. Distinct snapshots are retained under
-their hashes. If refresh fails, the previous snapshot remains usable and the page
-shows a warning. If no snapshot exists, the report fails visibly.
-
-The feed is community-maintained. Compare rates with official provider pricing
-before using the figures for commercial quotes. No prompts, usage counts or
-project names are sent to LiteLLM or GitHub: the plugin only downloads public data.
-
-## Permissions and upgrade isolation
-
-The manifest requests a UI page, read access to native cost/project/task/agent
-tables, company lookup, plugin-owned state read/write, outbound HTTP and scheduled
-jobs. The SDK also requires namespace migration permission when declaring core
-table reads; there are no SQL migrations or usage tables. The manual
-price-refresh action requires an authenticated board user.
-There are no agent execution, credential-read, native finance-write or
-budget-write capabilities.
-
-Paperclip plugins currently run as trusted code. Manifest capabilities are not
-a general sandbox. This plugin uses only the published SDK worker/UI interfaces
-and declared read-only table access; it does not import Paperclip server internals.
-
-Before a Paperclip update, run typecheck, tests and build against the intended SDK,
-then verify plugin health and the reporting page. If an upstream SDK contract
-changes, disable this plugin while adapting it. The company's core execution and
-budget behavior remain independent of the estimate page.
-
-## Development
+## Development and upgrades
 
 ```sh
-npm ci
 npm run typecheck
 npm test
 npm run build
 npm pack
 ```
 
-Tests cover cached-token arithmetic, unknown prices, partial attribution, invalid
-inputs, failed feed refresh, read-only SQL and manual action authorization.
+Tests cover cached-token arithmetic, native payload attribution, zero extra tokens,
+API/connector-event exclusion, concurrent/repeated/restarted sync, lost-response
+recovery and refusal to retry uncertain writes. Worker/native-table reads and
+private-table mutations use the official SDK. Native financial writes use the
+public cost-event API so all native accounting and budget hooks execute.
 
-License: MIT. This project is independent of Paperclip and LiteLLM.
+Paperclip plugins are trusted code in the current runtime. This project imports
+no server internals and never writes native tables directly. Before a host upgrade,
+validate the SDK build, plugin health, native cost totals and sync behavior. The
+connector can be disabled independently of core agent execution.
+
+License: MIT. Independent of Paperclip and LiteLLM.
