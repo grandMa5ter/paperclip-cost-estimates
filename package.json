@@ -1,0 +1,26 @@
+{
+  "name": "@grandma5ter/paperclip-cost-estimates",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Read-only Claude and Codex API-equivalent project estimates for Paperclip using LiteLLM prices.",
+  "license": "MIT",
+  "author": "grandMa5ter",
+  "repository": { "type": "git", "url": "https://github.com/grandMa5ter/paperclip-cost-estimates.git" },
+  "engines": { "node": ">=24.11.0" },
+  "files": ["dist", "migrations", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run typecheck && npm test && npm run build"
+  },
+  "paperclipPlugin": { "manifest": "./dist/manifest.js", "worker": "./dist/worker.js", "ui": "./dist/ui/" },
+  "peerDependencies": { "react": ">=18" },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "2026.1005.0",
+    "@types/node": "24.10.0",
+    "@types/react": "19.2.2",
+    "esbuild": "0.27.3",
+    "typescript": "5.9.3"
+  }
+}
